@@ -7,13 +7,17 @@
 #
 
 import subprocess
+import fnmatch
+from os import walk
 from os.path import exists, dirname, basename, splitext
+from os.path import join as pathJoin
 from hashlib import md5
 from sys import stdout, argv
 from functools import partial
 
 cppDepsTest = lambda x: shell("g++ -MM -MG "+x, True).replace ("\\\n","")
 cppDeps = lambda x: filter (None, cppDepsTest(x).split(" ")[2:])
+join = lambda x: " ".join (x)
 
 def main ():
 
@@ -32,7 +36,11 @@ def main ():
 	if exists ("Project"):
 		exec (fileText ("Project"))
 	else:
-		fail ("\"Project\" file is missing.")
+		print "\033[91m\"Project\" file is missing.\033[0m"
+		print "\033[95mCreating \"Project\" file...\033[0m"
+		initProjectFile ()
+		print "\033[92mOK\033[0m"
+		exec (fileText ("Project"))
 
 	if len(argv) > 1:
 		update (argv[1])
@@ -79,15 +87,45 @@ def addCppBinary (bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags)
 	for cpp, obj in zip (cpps, objs):
 		addCppObject (obj, cpp, cFlags)
 	for resFile, resCpp, resObj in zip (resFiles, resCpps, resObjs):
-		addResObj (resFile, resCpp, resObj, cFlags)
+		addResObj (resFile, resCpp, resObj, cFlags, True)
+	
+	return bin
 
-def addCppBinaryM (exeName, buildDir, cpps, resFiles = [], libFlags = "", cFlags = ""):
+def addCppBinaryM (bin, cpps, resFiles = [], cFlags = "", pkgs = [], libFlags = ""):
 
-	bin = buildDir+"/"+exeName
+	if cpps == []:
+		print "\033[91mC++ source file list is empty.\033[0m"
+		print "\033[95mCreating a dummy C++ source file...\033[0m"
+		dummyCppFile = ""
+		dummyCppFile += '\n'
+		dummyCppFile += 'int main (int argc, char **argv)\n'
+		dummyCppFile += '{\n'
+		dummyCppFile += '\treturn 0;\n'
+		dummyCppFile += '}\n'
+		dummyCppFile += '\n'
+		fs = open ("main.cpp", "w")
+		fs.write (dummyCppFile)
+		fs.close ()
+		cpps.append ("main.cpp")
+		print "\033[92mOK\033[0m"
+		
+	buildDir = dirname (bin)
 	objs = [buildDir+"/"+splitext(cpp)[0]+".o" for cpp in cpps]
-	resCpps = [buildDir+"/"+basename(resFile).replace(".","_")+".cpp" for resFile in resFiles]
-	resObjs = [buildDir+"/"+basename(resFile).replace(".","_")+".o" for resFile in resFiles]
-	addCppBinary (bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags)
+	
+	libFlags += " "+pkgConfigLibs (pkgs)
+	cFlags += " "+pkgConfigCflags (pkgs)
+	
+	resCpps = []
+	resObjs = []
+	for resFile in resFiles:
+		resBasename = basename(resFile).replace(".","_")
+		resDirname = dirname(resFile)
+		resCpp = buildDir+"/"+resDirname+"/"+resBasename+".cpp"
+		resObj = buildDir+"/"+resDirname+"/"+resBasename+".o"
+		resCpps.append (resCpp)
+		resObjs.append (resObj)
+	
+	return addCppBinary (bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags)
 
 def addAction (name, deps = [], recipe = []):
 
@@ -97,6 +135,16 @@ def addAction (name, deps = [], recipe = []):
 		recipe = [recipe]
 	env.rules[name] = (name, deps[:], recipe[:])
 	env.actions.add (name)
+	
+	return name
+
+def addRemoveAction (name, filename):
+
+	return addAction (name, [], "rm -rf " + filename)
+
+def addLaunchAction (name, bin):
+
+	return addAction (name, bin, "./"+bin)
 
 def update (name):
 
@@ -203,13 +251,19 @@ def shell (cmd, noError = False):
 		else:
 			fail ("FAIL", e.returncode)
 
-def pkgConfigLibs (pkg):
+def pkgConfigLibs (pkgs):
 
-	return shell ("pkg-config --libs "+pkg)
+	if type(pkgs) is not list:
+		pkgs = pkgs.split ()
+	
+	return join (shell ("pkg-config --libs "+pkg) for pkg in pkgs)
 
-def pkgConfigCflags (pkg):
+def pkgConfigCflags (pkgs):
 
-	return shell ("pkg-config --cflags "+pkg)
+	if type(pkgs) is not list:
+		pkgs = pkgs.split ()
+
+	return join (shell ("pkg-config --cflags "+pkg) for pkg in pkgs)
 
 def resourceToCpp (infilename, outfilename, isBinary = False):
 
@@ -232,6 +286,14 @@ def resourceToCpp (infilename, outfilename, isBinary = False):
 	fs = open (outfilename, "w")
 	fs.write (result)
 	fs.close ()
+
+def recGlob (path, pattern):
+
+	res = []
+	for dirpath, dirnames, files in walk (path):
+		for filename in fnmatch.filter (files, pattern):
+			res.append (pathJoin (dirpath, filename))
+	return res
 
 def fileText (filename):
 
@@ -256,6 +318,25 @@ def fail (msg, ret = 1):
 	print "\033[91m"+msg+"\033[0m"
 	#print "\tDependency Stack: "+str(env.depStack)
 	exit (ret)
+
+def initProjectFile ():
+
+	initialProjectFile = ""
+	initialProjectFile += 'bin = addCppBinaryM (\n'
+	initialProjectFile += '\t"./myproject",\n'
+	initialProjectFile += '\trecGlob (".","*.cpp"),\n'
+	initialProjectFile += '\tcFlags = "-std=c++11 -Wno-write-strings -Wno-pointer-arith",\n'
+	initialProjectFile += ')\n'
+	initialProjectFile += 'build = addAction ("build", bin)\n'
+	initialProjectFile += 'clean = addRemoveAction ("clean", dirname (bin))\n'
+	initialProjectFile += 'rebuild = addAction ("rebuild", [clean, build])\n'
+	initialProjectFile += 'launch = addLaunchAction ("launch", bin)\n'
+	initialProjectFile += 'env.default = build\n'
+	initialProjectFile += 'env.verbose = True\n'
+	
+	fs = open ("Project", "w")
+	fs.write (initialProjectFile)
+	fs.close ()
 
 if __name__ == "__main__":
 	main ()
