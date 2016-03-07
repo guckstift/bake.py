@@ -8,39 +8,48 @@
 
 import subprocess
 import fnmatch
+import sys
 from os import walk
 from os.path import exists, dirname, basename, splitext
 from os.path import join as pathJoin
 from hashlib import md5
 from sys import stdout, argv
 from functools import partial
+from urllib2 import urlopen
+from zipfile import ZipFile
+from shutil import copy, rmtree
 
 cppDepsTest = lambda x: shell("g++ -MM -MG "+x, True).replace ("\\\n","")
 cppDeps = lambda x: filter (None, cppDepsTest(x).split(" ")[2:])
 join = lambda x: " ".join (x)
+projectFileNames = [ "project.py", "Project" ]
+env = type ("Env", (object,), {}) ()
+env.verbose = True
+env.default = None
+env.rules = {}
+env.actions = set ()
+env.depStack = []
+env.gspkgs = {}
 
 def main ():
 
-	global env
-	class Env: pass
-	env = Env ()
-	
-	env.verbose = True
-	env.default = None
-	env.rules = {}
-	env.actions = set()
-	env.depStack = []
-
 	loadHashCache ()
-
-	if exists ("Project"):
-		exec (fileText ("Project"))
-	else:
-		print "\033[91m\"Project\" file is missing.\033[0m"
-		print "\033[95mCreating \"Project\" file...\033[0m"
+	
+	projectFileFound = None
+	
+	for pfname in projectFileNames:
+		if exists (pfname):
+			projectFileFound = pfname
+			break
+	
+	if projectFileFound is None:
+		print "\033[91mProject file is missing.\033[0m"
+		print "\033[95mCreating \"" + projectFileNames [0] + "\" ...\033[0m"
 		initProjectFile ()
+		projectFileFound = projectFileNames [0]
 		print "\033[92mOK\033[0m"
-		exec (fileText ("Project"))
+
+	exec (fileText (projectFileFound))
 
 	if len(argv) > 1:
 		update (argv[1])
@@ -58,21 +67,22 @@ def addRule (target, deps = [], recipe = []):
 	if type(recipe) is not list:
 		recipe = [recipe]
 	env.rules[target] = (target, deps[:], recipe[:])
+	return target
 
 def addCppObject (obj, cpp, cFlags = "", nodeptest = False):
 
 	if nodeptest:
-		addRule (obj, cpp,
+		return addRule (obj, cpp,
 			"g++ -o "+obj+" -c "+cpp+" "+cFlags
 		)
 	else:
-		addRule (obj, [cpp] + cppDeps(cpp),
+		return addRule (obj, [cpp] + cppDeps(cpp),
 			"g++ -o "+obj+" -c "+cpp+" "+cFlags
 		)
 
-def addBinary (bin, objs, libFlags):
+def addBinary (bin, objs, libFlags, otherDeps = []):
 
-	addRule (bin, objs,
+	return addRule (bin, otherDeps + objs,
 		"g++ -o "+bin+" "+" ".join(objs)+" "+libFlags
 	)
 
@@ -80,10 +90,11 @@ def addResObj (resFile, resCpp, resObj, cFlags, isBinary = False):
 
 	addRule (resCpp, resFile, partial (resourceToCpp, resFile, resCpp, isBinary))
 	addCppObject (resObj, resCpp, cFlags, True)
+	return resFile
 
-def addCppBinary (bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags):
+def addCppBinary (bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags, otherDeps = []):
 
-	addBinary (bin, objs + resObjs, libFlags)
+	addBinary (bin, objs + resObjs, libFlags, otherDeps)
 	for cpp, obj in zip (cpps, objs):
 		addCppObject (obj, cpp, cFlags)
 	for resFile, resCpp, resObj in zip (resFiles, resCpps, resObjs):
@@ -91,29 +102,23 @@ def addCppBinary (bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags)
 	
 	return bin
 
-def addCppBinaryM (bin, cpps, resFiles = [], cFlags = "", pkgs = [], libFlags = ""):
+def addCppBinaryM (bin, cpps, resFiles = [], cFlags = "", pkgs = [], libFlags = "", gspkgs = []):
 
-	if cpps == []:
-		print "\033[91mC++ source file list is empty.\033[0m"
-		print "\033[95mCreating a dummy C++ source file...\033[0m"
-		dummyCppFile = ""
-		dummyCppFile += '\n'
-		dummyCppFile += 'int main (int argc, char **argv)\n'
-		dummyCppFile += '{\n'
-		dummyCppFile += '\treturn 0;\n'
-		dummyCppFile += '}\n'
-		dummyCppFile += '\n'
-		fs = open ("main.cpp", "w")
-		fs.write (dummyCppFile)
-		fs.close ()
-		cpps.append ("main.cpp")
-		print "\033[92mOK\033[0m"
-		
+	cFlags += " -Igspkgs "
+	
+	for gspkg in gspkgs:
+		loadGsPkg (gspkg)
+		for gspkgCpp in recGlob ("gspkgs/", "*.cpp"):
+			cpps.append (gspkgCpp)
+	
+	for gspkg in env.gspkgs:
+		pkgs += env.gspkgs [gspkg]
+
 	buildDir = dirname (bin)
 	objs = [buildDir+"/"+splitext(cpp)[0]+".o" for cpp in cpps]
 	
-	libFlags += " "+pkgConfigLibs (pkgs)
-	cFlags += " "+pkgConfigCflags (pkgs)
+	libFlags += " " + pkgConfigLibs (pkgs)
+	cFlags += " " + pkgConfigCflags (pkgs)
 	
 	resCpps = []
 	resObjs = []
@@ -126,6 +131,60 @@ def addCppBinaryM (bin, cpps, resFiles = [], cFlags = "", pkgs = [], libFlags = 
 		resObjs.append (resObj)
 	
 	return addCppBinary (bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags)
+
+def manualLoadGsPkg (gspkg):
+
+	pkgDirName = "gspkgs/" + gspkg
+	pkgZipName = pkgDirName + "/gspkg.zip"
+	pkgPyName = pkgDirName + "/gspkg.py"
+	
+	shell ("mkdir -p " + pkgDirName, True)
+	
+	if not exists (pkgPyName):
+		if not exists (pkgZipName):
+			print ("\033[95mDownload guckstift-package '" + gspkg + "'\033[0m")
+			ufs = urlopen ("https://github.com/guckstift/gspkg-" + gspkg + "/archive/master.zip")
+			fs = open (pkgZipName, "wb")
+			fs.write (ufs.read ())
+			fs.close ()
+		print ("Unpack gs package '" + gspkg + "'")
+		unzippedDir = pkgDirName + "/gspkg-" + gspkg + "-master"
+		zf = ZipFile (pkgZipName)
+		zf.extractall (pkgDirName)
+		zf.close ()
+		fileList = recGlob (unzippedDir,"*")
+		for f in fileList:
+			copy (f, pkgDirName)
+		rmtree (unzippedDir)
+	
+	exec (fileText (pkgPyName))
+	
+	for gspkgDep in gspkgDeps:
+		manualLoadGsPkg (gspkgDep)
+
+def loadGsPkg (gspkg):
+
+	pkgDirName = "gspkgs/" + gspkg
+	pkgZipName = pkgDirName + "/gspkg.zip"
+	pkgPyName = pkgDirName + "/gspkg.py"
+	pkgGithubUrl = "https://github.com/guckstift/gspkg-" + gspkg + ".git"
+	
+	shell ("mkdir -p " + pkgDirName, True)
+	
+	if not exists (pkgPyName):
+		print ("\033[95mDownload guckstift-package '" + gspkg + "'\033[0m")
+		shell ("git clone " + pkgGithubUrl + " " + pkgDirName)
+	else:
+		print ("\033[95mUpdate guckstift-package '" + gspkg + "'\033[0m")
+		shell ("git -C "+pkgDirName+" pull origin master")
+	
+	exec (fileText (pkgPyName))
+	
+	for gspkgDep in gspkgDeps:
+		loadGsPkg (gspkgDep)
+
+	if gspkg not in env.gspkgs:
+		env.gspkgs [gspkg] = pkgDeps
 
 def addAction (name, deps = [], recipe = []):
 
@@ -183,7 +242,7 @@ def updateTarget (rule):
 		else:
 			rawPrint ("\033[95mUpdate\033[0m \""+target+"\" ")
 		
-		shell ("mkdir -p "+dirname(target))
+		shell ("mkdir -p "+dirname(target), True)
 		
 		bakeRecipe (recipe)
 		
@@ -321,20 +380,20 @@ def fail (msg, ret = 1):
 
 def initProjectFile ():
 
-	initialProjectFile = ""
+	initialProjectFile = "\n"
 	initialProjectFile += 'bin = addCppBinaryM (\n'
-	initialProjectFile += '\t"./myproject",\n'
-	initialProjectFile += '\trecGlob (".","*.cpp"),\n'
+	initialProjectFile += '\t"build/myproject",\n'
+	initialProjectFile += '\trecGlob ("src","*.cpp"),\n'
 	initialProjectFile += '\tcFlags = "-std=c++11 -Wno-write-strings -Wno-pointer-arith",\n'
-	initialProjectFile += ')\n'
+	initialProjectFile += ')\n\n'
 	initialProjectFile += 'build = addAction ("build", bin)\n'
 	initialProjectFile += 'clean = addRemoveAction ("clean", dirname (bin))\n'
 	initialProjectFile += 'rebuild = addAction ("rebuild", [clean, build])\n'
-	initialProjectFile += 'launch = addLaunchAction ("launch", bin)\n'
+	initialProjectFile += 'launch = addLaunchAction ("launch", bin)\n\n'
 	initialProjectFile += 'env.default = build\n'
-	initialProjectFile += 'env.verbose = True\n'
+	initialProjectFile += 'env.verbose = True\n\n'
 	
-	fs = open ("Project", "w")
+	fs = open (projectFileNames [0], "w")
 	fs.write (initialProjectFile)
 	fs.close ()
 
