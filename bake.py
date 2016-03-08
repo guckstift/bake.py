@@ -30,8 +30,11 @@ env.rules = {}
 env.actions = set ()
 env.depStack = []
 env.gspkgs = {}
+env.gspkgAutoUpdate = False
 
 def main ():
+
+	bakeInit ()
 
 	loadHashCache ()
 	
@@ -48,6 +51,7 @@ def main ():
 		initProjectFile ()
 		projectFileFound = projectFileNames [0]
 		print "\033[92mOK\033[0m"
+		exit (0)
 
 	exec (fileText (projectFileFound))
 
@@ -59,6 +63,21 @@ def main ():
 		fail ("No \"default\" target was set.")
 	
 	storeHashCache ()
+
+def bakeInit ():
+
+	missing = []
+	
+	if shell ("git --version", True, True) != 0:
+		missing.append ("'git'")
+	if shell ("pkg-config --version", True, True) != 0:
+		missing.append ("'pkg-config'")
+	
+	if missing:
+		fail (
+			"Some dependencies needed by bake.py are missing: " + ",".join (missing) + "\n" +
+			"Please install these packages!"
+		)
 
 def addRule (target, deps = [], recipe = []):
 
@@ -108,8 +127,9 @@ def addCppBinaryM (bin, cpps, resFiles = [], cFlags = "", pkgs = [], libFlags = 
 	
 	for gspkg in gspkgs:
 		loadGsPkg (gspkg)
-		for gspkgCpp in recGlob ("gspkgs/", "*.cpp"):
-			cpps.append (gspkgCpp)
+	
+	for gspkgCpp in recGlob ("gspkgs/", "*.cpp"):
+		cpps.append (gspkgCpp)
 	
 	for gspkg in env.gspkgs:
 		pkgs += env.gspkgs [gspkg]
@@ -132,6 +152,7 @@ def addCppBinaryM (bin, cpps, resFiles = [], cFlags = "", pkgs = [], libFlags = 
 	
 	return addCppBinary (bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags)
 
+"""
 def manualLoadGsPkg (gspkg):
 
 	pkgDirName = "gspkgs/" + gspkg
@@ -161,6 +182,7 @@ def manualLoadGsPkg (gspkg):
 	
 	for gspkgDep in gspkgDeps:
 		manualLoadGsPkg (gspkgDep)
+"""
 
 def loadGsPkg (gspkg):
 
@@ -174,7 +196,7 @@ def loadGsPkg (gspkg):
 	if not exists (pkgPyName):
 		print ("\033[95mDownload guckstift-package '" + gspkg + "'\033[0m")
 		shell ("git clone " + pkgGithubUrl + " " + pkgDirName)
-	else:
+	elif env.gspkgAutoUpdate:
 		print ("\033[95mUpdate guckstift-package '" + gspkg + "'\033[0m")
 		shell ("git -C "+pkgDirName+" pull origin master")
 	
@@ -298,14 +320,20 @@ def cacheHash (filename, curHash):
 
 	env.hashes[filename] = curHash
 
-def shell (cmd, noError = False):
+def shell (cmd, noError = False, retCode = False):
 
 	if type(cmd) is list:
 		cmd = " ".join (cmd)
 	try:
-		return subprocess.check_output (cmd, shell=True).strip (" \n\t")
+		if retCode:
+			return subprocess.call (cmd, shell=True,
+				stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+		else:
+			return subprocess.check_output (cmd, shell=True).strip (" \n\t")
 	except subprocess.CalledProcessError as e:
-		if noError:
+		if retCode:
+			return e.returncode
+		elif noError:
 			return ""
 		else:
 			fail ("FAIL", e.returncode)
