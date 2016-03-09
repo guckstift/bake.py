@@ -21,10 +21,16 @@ from shutil import copy, rmtree
 
 bakeLauncherScript = """#!/usr/bin/python2
 
+\"""
+This is the launcher script for bake.py, which can be placed in and called from your projects root
+directory. If the actual bake.py script is missing, it will be downloaded automatically from the
+github repository.
+\"""
+
 import subprocess
 import sys
 import os
-from os.path import exists
+from os.path import exists, isfile, isdir
 
 def shell (cmd, noError = False, retCode = False):
 
@@ -60,8 +66,11 @@ if not exists ("bake.py"):
 	print ("\\033[95mDownload bake.py\\033[0m")
 	shell ("git clone git@github.com:guckstift/bake.py.git")
 
-exec (fileText ("./bake.py/bake.py"))
-
+exec (fileText (
+	"./bake.py" if isfile ("./bake.py") else
+	"./bake.py/bake.py" if isfile ("./bake.py/bake.py") else
+	""
+))
 """
 
 cppDepsTest = lambda x: shell("g++ -MM -MG "+x, True).replace ("\\\n","")
@@ -138,7 +147,7 @@ def main ():
 def bakeInit ():
 
 	if not exists ("./bake"):
-		print "\033[95mCreating 'bake' launcher in current directory ...\033[0m"
+		print "\033[95mCopying 'bake' launcher into the current directory ...\033[0m"
 		#symlink ("./bake.py/bake.py", "./bake")
 		fs = open ("bake", "w")
 		fs.write (bakeLauncherScript)
