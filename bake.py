@@ -9,7 +9,7 @@
 import subprocess
 import fnmatch
 import sys
-from os import walk
+from os import walk, symlink
 from os.path import exists, dirname, basename, splitext
 from os.path import join as pathJoin
 from hashlib import md5
@@ -31,6 +31,29 @@ env.actions = set ()
 env.depStack = []
 env.gspkgs = {}
 env.gspkgAutoUpdate = False
+env.cliTargets = []
+
+class GsPkg:
+	def __init__ (self, name, gspkgDeps, pkgDeps, cpps):
+		self.name = name
+		self.gspkgDeps = gspkgDeps
+		self.pkgDeps = pkgDeps
+		self.cpps = cpps
+	def recCpps (self):
+		res = self.cpps
+		for dep in self.gspkgDeps:
+			gspkgdep = env.gspkgs [dep]
+			subres = gspkgdep.recCpps ()
+			res = mergeLists (res, subres)
+		return res
+	def recPkgDeps (self):
+		res = self.pkgDeps
+		for dep in self.gspkgDeps:
+			gspkgdep = env.gspkgs [dep]
+			subres = gspkgdep.recPkgDeps ()
+			res = mergeLists (res, subres)
+		return res
+		
 
 def main ():
 
@@ -52,19 +75,39 @@ def main ():
 		projectFileFound = projectFileNames [0]
 		print "\033[92mOK\033[0m"
 		exit (0)
+	
+	evalCliOptions ()
 
 	exec (fileText (projectFileFound))
 
-	if len(argv) > 1:
-		update (argv[1])
+	if len (env.cliTargets) != 0:
+		for target in env.cliTargets:
+			update (target)
 	elif env.default:
 		update (env.default)
 	else:
-		fail ("No \"default\" target was set.")
+		fail ("Neither command line targets nor \"default\" target was set.")
 	
 	storeHashCache ()
 
 def bakeInit ():
+
+	if not exists ("./bake"):
+		print "\033[95mCreating 'bake' symlink in current directory ...\033[0m"
+		symlink ("./bake.py/bake.py", "./bake")
+	
+	if not exists (".gitignore"):
+		open (".gitignore", "w").close ()
+	
+	gitIgnores = fileText (".gitignore").split ("\n")
+	
+	if "bake.py" not in gitIgnores:
+		print "\033[95mAdding 'bake.py' directory to your .gitignore ...\033[0m"
+		gitIgnores.append ("bake.py")
+	
+	fs = open (".gitignore", "w")
+	fs.write ("\n".join (gitIgnores))
+	fs.close ()
 
 	missing = []
 	
@@ -72,12 +115,25 @@ def bakeInit ():
 		missing.append ("'git'")
 	if shell ("pkg-config --version", True, True) != 0:
 		missing.append ("'pkg-config'")
+	if shell ("g++ --version", True, True) != 0:
+		missing.append ("'g++'")
 	
 	if missing:
 		fail (
 			"Some dependencies needed by bake.py are missing: " + ",".join (missing) + "\n" +
-			"Please install these packages!"
+			"Please install these dependencies!"
 		)
+
+def evalCliOptions ():
+
+	args = sys.argv[1:]
+	targets = list (filter (lambda a: not a.startswith ("-"), args))
+	opts = list (filter (lambda a: a.startswith ("-"), args))
+	
+	if "-u" in opts:
+		env.gspkgAutoUpdate = True
+	
+	env.cliTargets = targets
 
 def addRule (target, deps = [], recipe = []):
 
@@ -127,12 +183,8 @@ def addCppBinaryM (bin, cpps, resFiles = [], cFlags = "", pkgs = [], libFlags = 
 	
 	for gspkg in gspkgs:
 		loadGsPkg (gspkg)
-	
-	for gspkgCpp in recGlob ("gspkgs/", "*.cpp"):
-		cpps.append (gspkgCpp)
-	
-	for gspkg in env.gspkgs:
-		pkgs += env.gspkgs [gspkg]
+		cpps = mergeLists (cpps, env.gspkgs [gspkg].recCpps ())
+		pkgs = mergeLists (pkgs, env.gspkgs [gspkg].recPkgDeps ())
 
 	buildDir = dirname (bin)
 	objs = [buildDir+"/"+splitext(cpp)[0]+".o" for cpp in cpps]
@@ -152,61 +204,32 @@ def addCppBinaryM (bin, cpps, resFiles = [], cFlags = "", pkgs = [], libFlags = 
 	
 	return addCppBinary (bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags)
 
-"""
-def manualLoadGsPkg (gspkg):
+def loadGsPkg (name):
 
-	pkgDirName = "gspkgs/" + gspkg
-	pkgZipName = pkgDirName + "/gspkg.zip"
-	pkgPyName = pkgDirName + "/gspkg.py"
+	if name not in env.gspkgs:
 	
-	shell ("mkdir -p " + pkgDirName, True)
+		pkgDirName = "gspkgs/" + name
+		pkgZipName = pkgDirName + "/gspkg.zip"
+		pkgPyName = pkgDirName + "/gspkg.py"
+		pkgGithubUrl = "git@github.com:guckstift/gspkg-" + name + ".git"
 	
-	if not exists (pkgPyName):
-		if not exists (pkgZipName):
-			print ("\033[95mDownload guckstift-package '" + gspkg + "'\033[0m")
-			ufs = urlopen ("https://github.com/guckstift/gspkg-" + gspkg + "/archive/master.zip")
-			fs = open (pkgZipName, "wb")
-			fs.write (ufs.read ())
-			fs.close ()
-		print ("Unpack gs package '" + gspkg + "'")
-		unzippedDir = pkgDirName + "/gspkg-" + gspkg + "-master"
-		zf = ZipFile (pkgZipName)
-		zf.extractall (pkgDirName)
-		zf.close ()
-		fileList = recGlob (unzippedDir,"*")
-		for f in fileList:
-			copy (f, pkgDirName)
-		rmtree (unzippedDir)
+		shell ("mkdir -p " + pkgDirName, True)
 	
-	exec (fileText (pkgPyName))
+		if not exists (pkgPyName):
+			print ("\033[95mDownload guckstift-package '" + name + "'\033[0m")
+			shell ("git clone " + pkgGithubUrl + " " + pkgDirName)
+		elif env.gspkgAutoUpdate:
+			print ("\033[95mUpdate guckstift-package '" + name + "'\033[0m")
+			shell ("git -C " + pkgDirName + " pull origin master")
 	
-	for gspkgDep in gspkgDeps:
-		manualLoadGsPkg (gspkgDep)
-"""
-
-def loadGsPkg (gspkg):
-
-	pkgDirName = "gspkgs/" + gspkg
-	pkgZipName = pkgDirName + "/gspkg.zip"
-	pkgPyName = pkgDirName + "/gspkg.py"
-	pkgGithubUrl = "https://github.com/guckstift/gspkg-" + gspkg + ".git"
-	
-	shell ("mkdir -p " + pkgDirName, True)
-	
-	if not exists (pkgPyName):
-		print ("\033[95mDownload guckstift-package '" + gspkg + "'\033[0m")
-		shell ("git clone " + pkgGithubUrl + " " + pkgDirName)
-	elif env.gspkgAutoUpdate:
-		print ("\033[95mUpdate guckstift-package '" + gspkg + "'\033[0m")
-		shell ("git -C "+pkgDirName+" pull origin master")
-	
-	exec (fileText (pkgPyName))
-	
-	for gspkgDep in gspkgDeps:
-		loadGsPkg (gspkgDep)
-
-	if gspkg not in env.gspkgs:
-		env.gspkgs [gspkg] = pkgDeps
+		exec (fileText (pkgPyName))
+		
+		cpps = recGlob ("gspkgs/" + name + "/", "*.cpp")
+		gspkg = GsPkg (name, gspkgDeps, pkgDeps, cpps)
+		env.gspkgs [name] = gspkg
+		
+		for depname in gspkgDeps:
+			loadGsPkg (depname)
 
 def addAction (name, deps = [], recipe = []):
 
@@ -424,6 +447,14 @@ def initProjectFile ():
 	fs = open (projectFileNames [0], "w")
 	fs.write (initialProjectFile)
 	fs.close ()
+
+def mergeLists (la, lb):
+
+	lc = []
+	for i in la + lb:
+		if i not in lc:
+			lc.append (i)
+	return lc
 
 if __name__ == "__main__":
 	main ()
