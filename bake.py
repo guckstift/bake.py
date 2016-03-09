@@ -19,6 +19,51 @@ from urllib2 import urlopen
 from zipfile import ZipFile
 from shutil import copy, rmtree
 
+bakeLauncherScript = """#!/usr/bin/python2
+
+import subprocess
+import sys
+import os
+from os.path import exists
+
+def shell (cmd, noError = False, retCode = False):
+
+	if type(cmd) is list:
+		cmd = " ".join (cmd)
+	try:
+		if retCode:
+			return subprocess.call (cmd, shell=True,
+				stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+		else:
+			return subprocess.check_output (cmd, shell=True).strip (" \\n\\t")
+	except subprocess.CalledProcessError as e:
+		if retCode:
+			return e.returncode
+		elif noError:
+			return ""
+		else:
+			fail ("FAIL", e.returncode)
+
+def fileText (filename):
+
+	try:
+		return open (filename).read ()
+	except IOError:
+		return ""
+
+def fail (msg, ret = 1):
+
+	print "\\033[91m"+msg+"\\033[0m"
+	exit (ret)
+
+if not exists ("bake.py"):
+	print ("\\033[95mDownload bake.py\\033[0m")
+	shell ("git clone git@github.com:guckstift/bake.py.git")
+
+exec (fileText ("./bake.py/bake.py"))
+
+"""
+
 cppDepsTest = lambda x: shell("g++ -MM -MG "+x, True).replace ("\\\n","")
 cppDeps = lambda x: filter (None, cppDepsTest(x).split(" ")[2:])
 join = lambda x: " ".join (x)
@@ -93,8 +138,12 @@ def main ():
 def bakeInit ():
 
 	if not exists ("./bake"):
-		print "\033[95mCreating 'bake' symlink in current directory ...\033[0m"
-		symlink ("./bake.py/bake.py", "./bake")
+		print "\033[95mCreating 'bake' launcher in current directory ...\033[0m"
+		#symlink ("./bake.py/bake.py", "./bake")
+		fs = open ("bake", "w")
+		fs.write (bakeLauncherScript)
+		fs.close ()
+		shell ("chmod +x ./bake")
 	
 	if not exists (".gitignore"):
 		open (".gitignore", "w").close ()
