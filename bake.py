@@ -157,15 +157,20 @@ def bakeInit ():
 	if not exists (".gitignore"):
 		open (".gitignore", "w").close ()
 	
-	gitIgnores = fileText (".gitignore").split ("\n")
+	gitIgnores = filter (None, fileText (".gitignore").split ("\n"))
 	
 	if "bake.py" not in gitIgnores:
 		print "\033[95mAdding 'bake.py' directory to your .gitignore ...\033[0m"
 		gitIgnores.append ("bake.py")
-	
-	fs = open (".gitignore", "w")
-	fs.write ("\n".join (gitIgnores))
-	fs.close ()
+		fs = open (".gitignore", "w")
+		fs.write ("\n".join (gitIgnores))
+		fs.close ()
+	if "gspkgs" not in gitIgnores:
+		print "\033[95mAdding 'gspkgs' directory to your .gitignore ...\033[0m"
+		gitIgnores.append ("gspkgs")
+		fs = open (".gitignore", "w")
+		fs.write ("\n".join (gitIgnores))
+		fs.close ()
 
 	missing = []
 	
