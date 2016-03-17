@@ -1,10 +1,10 @@
 #!/usr/bin/python2
 
-#
-# bake.py - a python-style make tool
-#  author: Danny Raufeisen
-#  email: guckstift@posteo.de
-#
+"""
+  bake.py - a python-style make tool
+   author: Danny Raufeisen
+   email: guckstift@posteo.de
+"""
 
 import subprocess
 import fnmatch
@@ -73,7 +73,7 @@ exec (fileText (
 ))
 """
 
-cppDepsTest = lambda x: shell("g++ -MM -MG "+x, True).replace ("\\\n","")
+cppDepsTest = lambda x: shell("g++ -MM -MG "+x, dofail=False).replace ("\\\n","")
 cppDeps = lambda x: filter (None, cppDepsTest(x).split(" ")[2:])
 join = lambda x: " ".join (x)
 projectFileNames = [ "project.py", "Project" ]
@@ -152,7 +152,7 @@ def bakeInit ():
 		fs = open ("bake", "w")
 		fs.write (bakeLauncherScript)
 		fs.close ()
-		shell ("chmod +x ./bake")
+		shell ("chmod +x ./bake", prints="oe")
 	
 	if not exists (".gitignore"):
 		open (".gitignore", "w").close ()
@@ -174,11 +174,11 @@ def bakeInit ():
 
 	missing = []
 	
-	if shell ("git --version", True, True) != 0:
+	if shell ("git --version", "code", dofail=False) != 0:
 		missing.append ("'git'")
-	if shell ("pkg-config --version", True, True) != 0:
+	if shell ("pkg-config --version", "code", dofail=False) != 0:
 		missing.append ("'pkg-config'")
-	if shell ("g++ --version", True, True) != 0:
+	if shell ("g++ --version", "code", dofail=False) != 0:
 		missing.append ("'g++'")
 	
 	if missing:
@@ -275,15 +275,26 @@ def loadGsPkg (name):
 		pkgZipName = pkgDirName + "/gspkg.zip"
 		pkgPyName = pkgDirName + "/gspkg.py"
 		pkgGithubUrl = "git@github.com:guckstift/gspkg-" + name + ".git"
+		pkgGithubUrl2 = "git@github.com:guckstift/" + name + ".git"
 	
-		shell ("mkdir -p " + pkgDirName, True)
+		shell ("mkdir -p " + pkgDirName, prints="oe", dofail=False)
 	
 		if not exists (pkgPyName):
 			print ("\033[95mDownload guckstift-package '" + name + "'\033[0m")
-			shell ("git clone " + pkgGithubUrl + " " + pkgDirName)
+			code = shell (
+				"git clone " + pkgGithubUrl + " " + pkgDirName,
+				returns="code", prints="oe", dofail=False
+			)
+			if code != 0:
+				code = shell (
+					"git clone " + pkgGithubUrl2 + " " + pkgDirName,
+					returns="code", prints="oe", dofail=False
+				)
+			if code != 0:
+				fail ("could not download guckstift package '" + name + "'.")
 		elif env.gspkgAutoUpdate:
 			print ("\033[95mUpdate guckstift-package '" + name + "'\033[0m")
-			shell ("git -C " + pkgDirName + " pull origin master")
+			shell ("git -C " + pkgDirName + " pull origin master", prints="oe")
 	
 		exec (fileText (pkgPyName))
 		
@@ -350,7 +361,7 @@ def updateTarget (rule):
 		else:
 			rawPrint ("\033[95mUpdate\033[0m \""+target+"\" ")
 		
-		shell ("mkdir -p "+dirname(target), True)
+		shell ("mkdir -p " + dirname (target), prints="oe", dofail=False)
 		
 		bakeRecipe (recipe)
 		
@@ -385,7 +396,7 @@ def bakeRecipe (recipe):
 		else:
 			if env.verbose:
 				print cmd
-			shell (cmd)
+			shell (cmd, prints="oe")
 
 def loadHashCache ():
 
@@ -406,23 +417,52 @@ def cacheHash (filename, curHash):
 
 	env.hashes[filename] = curHash
 
-def shell (cmd, noError = False, retCode = False):
+def shell (cmd, returns = "output", prints = "", dofail = True):
+	"""
+	returns:
+		"output" - return output
+		"code" - return code
+	prints:
+		"" - print nothing
+		"o" - print stdout
+		"e" - print stderr
+		"oe" - print stdout and stderr
+	dofail:
+		True - FAIL on nonzero exit code
+		False - just don't fail
+	"""
 
 	if type(cmd) is list:
 		cmd = " ".join (cmd)
+	
 	try:
-		if retCode:
-			return subprocess.call (cmd, shell=True,
-				stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-		else:
-			return subprocess.check_output (cmd, shell=True).strip (" \n\t")
+		po = subprocess.Popen (cmd,
+			shell = True,
+			stdout = subprocess.PIPE,
+			stderr = subprocess.PIPE if "e" not in prints else None,
+		)
+		
+		output = ""
+		while True:
+			oc = po.stdout.read (1)
+			if oc == "": break
+			output += oc
+			if "o" in prints:
+				rawPrint (oc)
+		
+		po.poll ()
+		
+		if returns == "output":
+			return output.strip (" \n\t")
+		elif returns == "code":
+			return po.returncode
 	except subprocess.CalledProcessError as e:
-		if retCode:
-			return e.returncode
-		elif noError:
-			return ""
-		else:
+		if dofail:
 			fail ("FAIL", e.returncode)
+		elif returns == "output":
+			return ""
+		elif returns == "code":
+			return e.returncode
 
 def pkgConfigLibs (pkgs):
 
