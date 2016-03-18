@@ -23,7 +23,7 @@ bakeLauncherScript = """#!/usr/bin/python2
 
 \"""
 This is the launcher script for bake.py, which can be placed in and called from your projects root
-directory. If the actual bake.py script is missing, it will be downloaded automatically from the
+directory. If the actual bake.py package is missing, it will be downloaded automatically from the
 github repository.
 \"""
 
@@ -88,11 +88,12 @@ env.gspkgAutoUpdate = False
 env.cliTargets = []
 
 class GsPkg:
-	def __init__ (self, name, gspkgDeps, pkgDeps, cpps):
+	def __init__ (self, name, gspkgDeps, pkgDeps, cpps, resFiles):
 		self.name = name
 		self.gspkgDeps = gspkgDeps
 		self.pkgDeps = pkgDeps
 		self.cpps = cpps
+		self.resFiles = [ "gspkgs/"+name+"/"+resFile for resFile in resFiles ]
 	def recCpps (self):
 		res = self.cpps
 		for dep in self.gspkgDeps:
@@ -107,7 +108,13 @@ class GsPkg:
 			subres = gspkgdep.recPkgDeps ()
 			res = mergeLists (res, subres)
 		return res
-		
+	def recResFiles (self):
+		res = self.resFiles
+		for dep in self.gspkgDeps:
+			gspkgdep = env.gspkgs [dep]
+			subres = gspkgdep.recResFiles ()
+			res = mergeLists (res, subres)
+		return res
 
 def main ():
 
@@ -148,7 +155,6 @@ def bakeInit ():
 
 	if not exists ("./bake"):
 		print "\033[95mCopying 'bake' launcher into the current directory ...\033[0m"
-		#symlink ("./bake.py/bake.py", "./bake")
 		fs = open ("bake", "w")
 		fs.write (bakeLauncherScript)
 		fs.close ()
@@ -220,6 +226,9 @@ def addCppObject (obj, cpp, cFlags = "", nodeptest = False):
 
 def addBinary (bin, objs, libFlags, otherDeps = []):
 
+	if type (otherDeps) is not list:
+		otherDeps = [otherDeps]
+	
 	return addRule (bin, otherDeps + objs,
 		"g++ -o "+bin+" "+" ".join(objs)+" "+libFlags
 	)
@@ -236,11 +245,17 @@ def addCppBinary (bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags,
 	for cpp, obj in zip (cpps, objs):
 		addCppObject (obj, cpp, cFlags)
 	for resFile, resCpp, resObj in zip (resFiles, resCpps, resObjs):
-		addResObj (resFile, resCpp, resObj, cFlags, True)
+		addResObj (resFile, resCpp, resObj, cFlags) #, True)
 	
 	return bin
 
 def addCppBinaryM (bin, cpps, resFiles = [], cFlags = "", pkgs = [], libFlags = "", gspkgs = []):
+	"""
+	Adds a target to build the binary 'bin' from several C++ source files 'cpps' including
+	resource files 'resFiles' via the resource loading system, with compiler flags 'cFlags',
+	additional library flags 'libFlags' packages included through the 'pkg-config' tool and
+	guckstift packages 'gspkgs'.
+	"""
 
 	cFlags += " -Igspkgs "
 	
@@ -248,7 +263,8 @@ def addCppBinaryM (bin, cpps, resFiles = [], cFlags = "", pkgs = [], libFlags = 
 		loadGsPkg (gspkg)
 		cpps = mergeLists (cpps, env.gspkgs [gspkg].recCpps ())
 		pkgs = mergeLists (pkgs, env.gspkgs [gspkg].recPkgDeps ())
-
+		resFiles = mergeLists (resFiles, env.gspkgs [gspkg].recResFiles ())
+	
 	buildDir = dirname (bin)
 	objs = [buildDir+"/"+splitext(cpp)[0]+".o" for cpp in cpps]
 	
@@ -265,7 +281,19 @@ def addCppBinaryM (bin, cpps, resFiles = [], cFlags = "", pkgs = [], libFlags = 
 		resCpps.append (resCpp)
 		resObjs.append (resObj)
 	
-	return addCppBinary (bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags)
+	# add target for resource list header
+	resListHeaderDir = buildDir + "/reslist"
+	resListHeader = resListHeaderDir + "/reslist.h"
+	cFlags += " -I" + resListHeaderDir + " "
+	addRule (
+		resListHeader, resFiles, partial (
+			buildResListHeader, resFiles, resListHeader
+		)
+	)
+	
+	return addCppBinary (
+		bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags, resListHeader
+	)
 
 def loadGsPkg (name):
 
@@ -299,7 +327,7 @@ def loadGsPkg (name):
 		exec (fileText (pkgPyName))
 		
 		cpps = recGlob ("gspkgs/" + name + "/", "*.cpp")
-		gspkg = GsPkg (name, gspkgDeps, pkgDeps, cpps)
+		gspkg = GsPkg (name, gspkgDeps, pkgDeps, cpps, resFiles)
 		env.gspkgs [name] = gspkg
 		
 		for depname in gspkgDeps:
@@ -435,34 +463,28 @@ def shell (cmd, returns = "output", prints = "", dofail = True):
 	if type(cmd) is list:
 		cmd = " ".join (cmd)
 	
-	try:
-		po = subprocess.Popen (cmd,
-			shell = True,
-			stdout = subprocess.PIPE,
-			stderr = subprocess.PIPE if "e" not in prints else None,
-		)
-		
-		output = ""
-		while True:
-			oc = po.stdout.read (1)
-			if oc == "": break
-			output += oc
-			if "o" in prints:
-				rawPrint (oc)
-		
-		po.poll ()
-		
-		if returns == "output":
-			return output.strip (" \n\t")
-		elif returns == "code":
-			return po.returncode
-	except subprocess.CalledProcessError as e:
-		if dofail:
-			fail ("FAIL", e.returncode)
-		elif returns == "output":
-			return ""
-		elif returns == "code":
-			return e.returncode
+	po = subprocess.Popen (cmd,
+		shell = True,
+		stdout = subprocess.PIPE,
+		stderr = subprocess.PIPE if "e" not in prints else None,
+	)
+	
+	output = ""
+	while True:
+		oc = po.stdout.read (1)
+		if oc == "": break
+		output += oc
+		if "o" in prints:
+			rawPrint (oc)
+	
+	po.wait ()
+	
+	if dofail and po.returncode != 0:
+		fail ("FAIL", po.returncode)
+	elif returns == "output":
+		return output.strip (" \n\t")
+	elif returns == "code":
+		return po.returncode
 
 def pkgConfigLibs (pkgs):
 
@@ -482,11 +504,12 @@ def resourceToCpp (infilename, outfilename, isBinary = False):
 
 	if env.verbose:
 		print "resourceToCpp (",infilename,",",outfilename,")"
+	
 	fs = open (infilename, "rb")
 	data = fs.read ()
 	fs.close ()
 	
-	varName = basename (infilename).replace (".","_")
+	varName = resourceVarName (infilename)
 	result = ""
 	result += "unsigned long size_" + varName + " = " + str(len(data)) + ";\n"
 	if isBinary:
@@ -496,6 +519,22 @@ def resourceToCpp (infilename, outfilename, isBinary = False):
 		result += "char *res_" + varName + " = "
 		result += '"' + "".join (repr(i)[1:-1] for i in data) + '";\n'
 	
+	fs = open (outfilename, "w")
+	fs.write (result)
+	fs.close ()
+
+def resourceVarName (infilename):
+
+	return infilename.replace ("/","_").replace (".","_")
+	#return basename (infilename).replace (".","_")
+
+def buildResListHeader (resFiles, outfilename):
+
+	result = "".join (
+		"extern unsigned long size_" + varName + ";\n" +
+		"extern char* res_" + varName + ";\n"
+		for varName in map (resourceVarName, resFiles)
+	)
 	fs = open (outfilename, "w")
 	fs.write (result)
 	fs.close ()
@@ -528,7 +567,7 @@ def rawPrint (msg):
 
 def fail (msg, ret = 1):
 
-	print "\033[91m"+msg+"\033[0m"
+	print "\033[91m" + msg + " (" + str (ret) + ")" + "\033[0m"
 	#print "\tDependency Stack: "+str(env.depStack)
 	exit (ret)
 
