@@ -6,115 +6,16 @@
    email: guckstift@posteo.de
 """
 
-import subprocess
-import fnmatch
 import sys
-from os import walk, symlink
-from os.path import exists, dirname, basename, splitext
-from os.path import join as pathJoin
-from hashlib import md5
-from sys import stdout, argv
-from functools import partial
-from urllib2 import urlopen
-from zipfile import ZipFile
 from shutil import copy, rmtree
 
-bakeLauncherScript = """#!/usr/bin/python2
+from common import *
+from targets import *
+from resources import *
+from gspkg import *
+from cache import *
 
-\"""
-This is the launcher script for bake.py, which can be placed in and called from your projects root
-directory. If the actual bake.py package is missing, it will be downloaded automatically from the
-github repository.
-\"""
-
-import subprocess
-import sys
-import os
-from os.path import exists, isfile, isdir
-
-def shell (cmd, noError = False, retCode = False):
-
-	if type(cmd) is list:
-		cmd = " ".join (cmd)
-	try:
-		if retCode:
-			return subprocess.call (cmd, shell=True,
-				stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-		else:
-			return subprocess.check_output (cmd, shell=True).strip (" \\n\\t")
-	except subprocess.CalledProcessError as e:
-		if retCode:
-			return e.returncode
-		elif noError:
-			return ""
-		else:
-			fail ("FAIL", e.returncode)
-
-def fileText (filename):
-
-	try:
-		return open (filename).read ()
-	except IOError:
-		return ""
-
-def fail (msg, ret = 1):
-
-	print "\\033[91m"+msg+"\\033[0m"
-	exit (ret)
-
-if not exists ("bake.py"):
-	print ("\\033[95mDownload bake.py\\033[0m")
-	shell ("git clone git@github.com:guckstift/bake.py.git")
-
-exec (fileText (
-	"./bake.py" if isfile ("./bake.py") else
-	"./bake.py/bake.py" if isfile ("./bake.py/bake.py") else
-	""
-))
-"""
-
-cppDepsTest = lambda x: shell("g++ -MM -MG "+x, dofail=False).replace ("\\\n","")
-cppDeps = lambda x: filter (None, cppDepsTest(x).split(" ")[2:])
-join = lambda x: " ".join (x)
 projectFileNames = [ "project.py", "Project" ]
-env = type ("Env", (object,), {}) ()
-env.verbose = True
-env.default = None
-env.rules = {}
-env.actions = set ()
-env.depStack = []
-env.gspkgs = {}
-env.gspkgAutoUpdate = False
-env.cliTargets = []
-
-class GsPkg:
-	def __init__ (self, name, gspkgDeps, pkgDeps, cpps, resFiles):
-		self.name = name
-		self.gspkgDeps = gspkgDeps
-		self.pkgDeps = pkgDeps
-		self.cpps = cpps
-		self.resFiles = [ "gspkgs/"+name+"/"+resFile for resFile in resFiles ]
-	def recCpps (self):
-		res = self.cpps
-		for dep in self.gspkgDeps:
-			gspkgdep = env.gspkgs [dep]
-			subres = gspkgdep.recCpps ()
-			res = mergeLists (res, subres)
-		return res
-	def recPkgDeps (self):
-		res = self.pkgDeps
-		for dep in self.gspkgDeps:
-			gspkgdep = env.gspkgs [dep]
-			subres = gspkgdep.recPkgDeps ()
-			res = mergeLists (res, subres)
-		return res
-	def recResFiles (self):
-		res = self.resFiles
-		for dep in self.gspkgDeps:
-			gspkgdep = env.gspkgs [dep]
-			subres = gspkgdep.recResFiles ()
-			res = mergeLists (res, subres)
-		return res
 
 def main ():
 
@@ -140,8 +41,10 @@ def main ():
 	evalCliOptions ()
 
 	exec (fileText (projectFileFound))
-
-	if len (env.cliTargets) != 0:
+	
+	if env.optPrintTree:
+		printDepTree ()
+	elif len (env.cliTargets) != 0:
 		for target in env.cliTargets:
 			update (target)
 	elif env.default:
@@ -201,156 +104,21 @@ def evalCliOptions ():
 	
 	if "-u" in opts:
 		env.gspkgAutoUpdate = True
+	if "-t" in opts:
+		env.optPrintTree = True
 	
 	env.cliTargets = targets
 
-def addRule (target, deps = [], recipe = []):
+def printDepTree (target = None, indentLvl = 0):
 
-	if type(deps) is not list:
-		deps = [deps]
-	if type(recipe) is not list:
-		recipe = [recipe]
-	env.rules[target] = (target, deps[:], recipe[:])
-	return target
-
-def addCppObject (obj, cpp, cFlags = "", nodeptest = False):
-
-	if nodeptest:
-		return addRule (obj, cpp,
-			"g++ -o "+obj+" -c "+cpp+" "+cFlags
-		)
-	else:
-		return addRule (obj, [cpp] + cppDeps(cpp),
-			"g++ -o "+obj+" -c "+cpp+" "+cFlags
-		)
-
-def addBinary (bin, objs, libFlags, otherDeps = []):
-
-	if type (otherDeps) is not list:
-		otherDeps = [otherDeps]
-	
-	return addRule (bin, otherDeps + objs,
-		"g++ -o "+bin+" "+" ".join(objs)+" "+libFlags
-	)
-
-def addResObj (resFile, resCpp, resObj, cFlags, isBinary = False):
-
-	addRule (resCpp, resFile, partial (resourceToCpp, resFile, resCpp, isBinary))
-	addCppObject (resObj, resCpp, cFlags, True)
-	return resFile
-
-def addCppBinary (bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags, otherDeps = []):
-
-	addBinary (bin, objs + resObjs, libFlags, otherDeps)
-	for cpp, obj in zip (cpps, objs):
-		addCppObject (obj, cpp, cFlags)
-	for resFile, resCpp, resObj in zip (resFiles, resCpps, resObjs):
-		addResObj (resFile, resCpp, resObj, cFlags) #, True)
-	
-	return bin
-
-def addCppBinaryM (bin, cpps, resFiles = [], cFlags = "", pkgs = [], libFlags = "", gspkgs = []):
-	"""
-	Adds a target to build the binary 'bin' from several C++ source files 'cpps' including
-	resource files 'resFiles' via the resource loading system, with compiler flags 'cFlags',
-	additional library flags 'libFlags' packages included through the 'pkg-config' tool and
-	guckstift packages 'gspkgs'.
-	"""
-
-	cFlags += " -Igspkgs "
-	
-	for gspkg in gspkgs:
-		loadGsPkg (gspkg)
-		cpps = mergeLists (cpps, env.gspkgs [gspkg].recCpps ())
-		pkgs = mergeLists (pkgs, env.gspkgs [gspkg].recPkgDeps ())
-		resFiles = mergeLists (resFiles, env.gspkgs [gspkg].recResFiles ())
-	
-	buildDir = dirname (bin)
-	objs = [buildDir+"/"+splitext(cpp)[0]+".o" for cpp in cpps]
-	
-	libFlags += " " + pkgConfigLibs (pkgs)
-	cFlags += " " + pkgConfigCflags (pkgs)
-	
-	resCpps = []
-	resObjs = []
-	for resFile in resFiles:
-		resBasename = basename(resFile).replace(".","_")
-		resDirname = dirname(resFile)
-		resCpp = buildDir+"/"+resDirname+"/"+resBasename+".cpp"
-		resObj = buildDir+"/"+resDirname+"/"+resBasename+".o"
-		resCpps.append (resCpp)
-		resObjs.append (resObj)
-	
-	# add target for resource list header
-	resListHeaderDir = buildDir + "/reslist"
-	resListHeader = resListHeaderDir + "/reslist.h"
-	cFlags += " -I" + resListHeaderDir + " "
-	addRule (
-		resListHeader, resFiles, partial (
-			buildResListHeader, resFiles, resListHeader
-		)
-	)
-	
-	return addCppBinary (
-		bin, cpps, objs, resFiles, resCpps, resObjs, libFlags, cFlags, resListHeader
-	)
-
-def loadGsPkg (name):
-
-	if name not in env.gspkgs:
-	
-		pkgDirName = "gspkgs/" + name
-		pkgZipName = pkgDirName + "/gspkg.zip"
-		pkgPyName = pkgDirName + "/gspkg.py"
-		pkgGithubUrl = "git@github.com:guckstift/gspkg-" + name + ".git"
-		pkgGithubUrl2 = "git@github.com:guckstift/" + name + ".git"
-	
-		shell ("mkdir -p " + pkgDirName, prints="oe", dofail=False)
-	
-		if not exists (pkgPyName):
-			print ("\033[95mDownload guckstift-package '" + name + "'\033[0m")
-			code = shell (
-				"git clone " + pkgGithubUrl + " " + pkgDirName,
-				returns="code", prints="oe", dofail=False
-			)
-			if code != 0:
-				code = shell (
-					"git clone " + pkgGithubUrl2 + " " + pkgDirName,
-					returns="code", prints="oe", dofail=False
-				)
-			if code != 0:
-				fail ("could not download guckstift package '" + name + "'.")
-		elif env.gspkgAutoUpdate:
-			print ("\033[95mUpdate guckstift-package '" + name + "'\033[0m")
-			shell ("git -C " + pkgDirName + " pull origin master", prints="oe")
-	
-		exec (fileText (pkgPyName))
+	if target is None:
+		target = env.default
 		
-		cpps = recGlob ("gspkgs/" + name + "/", "*.cpp")
-		gspkg = GsPkg (name, gspkgDeps, pkgDeps, cpps, resFiles)
-		env.gspkgs [name] = gspkg
-		
-		for depname in gspkgDeps:
-			loadGsPkg (depname)
-
-def addAction (name, deps = [], recipe = []):
-
-	if type(deps) is str:
-		deps = [deps]
-	if type(recipe) is str:
-		recipe = [recipe]
-	env.rules[name] = (name, deps[:], recipe[:])
-	env.actions.add (name)
+	print "  "*indentLvl + target
 	
-	return name
-
-def addRemoveAction (name, filename):
-
-	return addAction (name, [], "rm -rf " + filename)
-
-def addLaunchAction (name, bin):
-
-	return addAction (name, bin, "./"+bin)
+	if target in env.rules:
+		for dep in env.rules [target][1]:
+			printDepTree (dep, indentLvl + 1)
 
 def update (name):
 
@@ -373,21 +141,23 @@ def updateTarget (rule):
 		
 	if target in env.actions:
 	
+		rawPrintInfo ("Do")
 		if env.verbose:
-			print "\033[95mDo\033[0m \""+target+"\""+(" (deps: "+", ".join(deps)+")" if deps else "")
+			print ' "' + target + '"' + (" (deps: " + ", ".join (deps) + ")" if deps else "")
 		else:
-			rawPrint ("\033[95mDo\033[0m \""+target+"\" ")
+			rawPrint ('"' + target + '" ')
 		
 		bakeRecipe (recipe)
-		print "\033[92mOK\033[0m"
+		printOk ("OK")
 		hasChanged = depsChanged
 	
 	elif not exists (target) or depsChanged:
 	
+		rawPrintInfo ("Update")
 		if env.verbose:
-			print "\033[95mUpdate\033[0m \""+target+"\""+(" (deps: "+", ".join(deps)+")" if deps else "")
+			print '"' + target + '"' + (" (deps: " + ", ".join (deps) + ")" if deps else "")
 		else:
-			rawPrint ("\033[95mUpdate\033[0m \""+target+"\" ")
+			rawPrint ('"' + target + '" ')
 		
 		shell ("mkdir -p " + dirname (target), prints="oe", dofail=False)
 		
@@ -396,7 +166,7 @@ def updateTarget (rule):
 		if not exists (target):
 			fail ("Error: Target \""+target+"\" was not baked by its rule.")
 		else:
-			print "\033[92mOK\033[0m"
+			printOk ("OK")
 		
 		hasChanged = True
 	
@@ -426,151 +196,6 @@ def bakeRecipe (recipe):
 				print cmd
 			shell (cmd, prints="oe")
 
-def loadHashCache ():
-
-	env.hashes = dict(i.split(" ") for i in filter (None,fileText("HashCache").split("\n")))
-
-def storeHashCache ():
-
-	open("HashCache","w").write("\n".join(k+" "+v for k,v in env.hashes.items()))
-
-def cachedHash (filename):
-
-	try:
-		return env.hashes[filename]
-	except KeyError:
-		return ""
-
-def cacheHash (filename, curHash):
-
-	env.hashes[filename] = curHash
-
-def shell (cmd, returns = "output", prints = "", dofail = True):
-	"""
-	returns:
-		"output" - return output
-		"code" - return code
-	prints:
-		"" - print nothing
-		"o" - print stdout
-		"e" - print stderr
-		"oe" - print stdout and stderr
-	dofail:
-		True - FAIL on nonzero exit code
-		False - just don't fail
-	"""
-
-	if type(cmd) is list:
-		cmd = " ".join (cmd)
-	
-	po = subprocess.Popen (cmd,
-		shell = True,
-		stdout = subprocess.PIPE,
-		stderr = subprocess.PIPE if "e" not in prints else None,
-	)
-	
-	output = ""
-	while True:
-		oc = po.stdout.read (1)
-		if oc == "": break
-		output += oc
-		if "o" in prints:
-			rawPrint (oc)
-	
-	po.wait ()
-	
-	if dofail and po.returncode != 0:
-		fail ("FAIL", po.returncode)
-	elif returns == "output":
-		return output.strip (" \n\t")
-	elif returns == "code":
-		return po.returncode
-
-def pkgConfigLibs (pkgs):
-
-	if type(pkgs) is not list:
-		pkgs = pkgs.split ()
-	
-	return join (shell ("pkg-config --libs "+pkg) for pkg in pkgs)
-
-def pkgConfigCflags (pkgs):
-
-	if type(pkgs) is not list:
-		pkgs = pkgs.split ()
-
-	return join (shell ("pkg-config --cflags "+pkg) for pkg in pkgs)
-
-def resourceToCpp (infilename, outfilename, isBinary = False):
-
-	if env.verbose:
-		print "resourceToCpp (",infilename,",",outfilename,")"
-	
-	fs = open (infilename, "rb")
-	data = fs.read ()
-	fs.close ()
-	
-	varName = resourceVarName (infilename)
-	result = ""
-	result += "unsigned long size_" + varName + " = " + str(len(data)) + ";\n"
-	if isBinary:
-		result += "unsigned char res_" + varName + "[] = "
-		result += "{" + ",".join (str(ord(i)) for i in data) + "};\n"
-	else:
-		result += "char *res_" + varName + " = "
-		result += '"' + "".join (repr(i)[1:-1] for i in data) + '";\n'
-	
-	fs = open (outfilename, "w")
-	fs.write (result)
-	fs.close ()
-
-def resourceVarName (infilename):
-
-	return infilename.replace ("/","_").replace (".","_")
-	#return basename (infilename).replace (".","_")
-
-def buildResListHeader (resFiles, outfilename):
-
-	result = "".join (
-		"extern unsigned long size_" + varName + ";\n" +
-		"extern char* res_" + varName + ";\n"
-		for varName in map (resourceVarName, resFiles)
-	)
-	fs = open (outfilename, "w")
-	fs.write (result)
-	fs.close ()
-
-def recGlob (path, pattern):
-
-	res = []
-	for dirpath, dirnames, files in walk (path):
-		for filename in fnmatch.filter (files, pattern):
-			res.append (pathJoin (dirpath, filename))
-	return res
-
-def fileText (filename):
-
-	try:
-		return open (filename).read ()
-	except IOError:
-		return ""
-
-def fileHash (filename):
-
-	m = md5 ()
-	m.update (fileText (filename))
-	return m.hexdigest ()
-
-def rawPrint (msg):
-
-	stdout.write (msg)
-	stdout.flush ()
-
-def fail (msg, ret = 1):
-
-	print "\033[91m" + msg + " (" + str (ret) + ")" + "\033[0m"
-	#print "\tDependency Stack: "+str(env.depStack)
-	exit (ret)
-
 def initProjectFile ():
 
 	initialProjectFile = "\n"
@@ -589,14 +214,6 @@ def initProjectFile ():
 	fs = open (projectFileNames [0], "w")
 	fs.write (initialProjectFile)
 	fs.close ()
-
-def mergeLists (la, lb):
-
-	lc = []
-	for i in la + lb:
-		if i not in lc:
-			lc.append (i)
-	return lc
 
 if __name__ == "__main__":
 	main ()
