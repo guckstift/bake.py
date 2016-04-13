@@ -95,9 +95,9 @@ def addCppBinaryM (bin, cpps, resFiles = [], cFlags = "", pkgs = [], libFlags = 
 
 def addAction (name, deps = [], recipe = []):
 
-	if type(deps) is str:
+	if type(deps) is not list:
 		deps = [deps]
-	if type(recipe) is str:
+	if type(recipe) is not list:
 		recipe = [recipe]
 	env.rules[name] = (name, deps[:], recipe[:])
 	env.actions.add (name)

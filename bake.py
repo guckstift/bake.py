@@ -59,7 +59,7 @@ def bakeInit ():
 	if not exists ("./bake"):
 		print "\033[95mCopying 'bake' launcher into the current directory ...\033[0m"
 		fs = open ("bake", "w")
-		fs.write (bakeLauncherScript)
+		fs.write (open ("./bake.py/launcher.py", "r").read ())
 		fs.close ()
 		shell ("chmod +x ./bake", prints="oe")
 	
